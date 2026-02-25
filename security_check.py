@@ -1428,7 +1428,7 @@ Examples:
 
         # Config
         if not CONFIG_FILE.exists():
-            log(f"    [WARN] config.json missing — run setup.ps1", P2)
+            log("    [WARN] config.json missing — run setup.ps1", P2)
         elif config.get("email", {}).get("app_password") == "YOUR_GMAIL_APP_PASSWORD_HERE":
             log("    [WARN] Email not configured — run setup.ps1 to configure", P2)
         else:
