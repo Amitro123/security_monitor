@@ -1,0 +1,4 @@
+config.json
+security_log.txt
+__pycache__/
+.env
