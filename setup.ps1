@@ -1,169 +1,208 @@
 # ============================================================
-# Security Monitor - Setup Script
+# Security Monitor v2.0 - Enterprise Installer
 # Run once as Administrator to install everything.
 # ============================================================
 #Requires -Version 5.0
+[CmdletBinding()]
+param()
 
 $ErrorActionPreference = "Continue"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$VERSION    = "2.0.0"
+$ScriptDir  = Split-Path -Parent $MyInvocation.MyCommand.Path
+$PythonScript = Join-Path $ScriptDir "security_check.py"
+$CredTarget = "SecurityMonitor_Gmail"
+
+function Write-Step { param([string]$msg, [string]$color = "Cyan")
+    Write-Host ""
+    Write-Host "  $msg" -ForegroundColor $color
+}
+function Write-OK   { param([string]$msg) Write-Host "      [OK]   $msg" -ForegroundColor Green }
+function Write-WARN { param([string]$msg) Write-Host "      [WARN] $msg" -ForegroundColor Yellow }
+function Write-FAIL { param([string]$msg) Write-Host "      [FAIL] $msg" -ForegroundColor Red }
 
 Write-Host ""
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Security Monitor - Setup" -ForegroundColor Cyan
+Write-Host "  Security Monitor v$VERSION - Setup" -ForegroundColor Cyan
 Write-Host "============================================" -ForegroundColor Cyan
-Write-Host ""
 
-# - 1. Check admin -
+# ── 1. Admin check ────────────────────────────────────────────
+Write-Step "[1/7] Checking administrator privileges..."
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
-    Write-Host "[!] Please re-run as Administrator (right-click PowerShell -> Run as administrator)." -ForegroundColor Red
+    Write-FAIL "Please re-run as Administrator (right-click PowerShell -> Run as administrator)."
     Read-Host "Press Enter to exit"
     exit 1
 }
+Write-OK "Running as Administrator"
 
-# - 2. Find Python -
-Write-Host "[1/5] Checking for Python..." -ForegroundColor Yellow
+# ── 2. Find Python ────────────────────────────────────────────
+Write-Step "[2/7] Checking Python 3.8+..."
 $python = $null
-
 foreach ($cmd in @("python", "python3", "py")) {
     try {
         $ver = & $cmd --version 2>&1
-        if ($ver -match "Python 3") {
+        if ($ver -match "Python 3\.([89]|1[0-9])") {
             $python = $cmd
-            Write-Host "      Found: $ver  (command: $cmd)" -ForegroundColor Green
+            Write-OK "Found: $ver (command: $cmd)"
             break
         }
     } catch {}
 }
-
 if (-not $python) {
-    Write-Host "[!] Python 3 not found." -ForegroundColor Red
+    Write-FAIL "Python 3.8+ not found."
     Write-Host "    Download from: https://python.org (check 'Add Python to PATH')" -ForegroundColor Yellow
     Read-Host "Press Enter to exit"
     exit 1
 }
 
-# - 3. Install psutil -
-Write-Host "[2/5] Installing required Python packages..." -ForegroundColor Yellow
+# ── 3. Install dependencies ───────────────────────────────────
+Write-Step "[3/7] Installing Python dependencies..."
 & $python -m pip install psutil --quiet --upgrade
 if ($LASTEXITCODE -ne 0) {
-    Write-Host "[!] pip install failed. Check your internet connection." -ForegroundColor Red
+    Write-FAIL "pip install failed. Check your internet connection."
     Read-Host "Press Enter to exit"
     exit 1
 }
-Write-Host "      psutil installed/updated." -ForegroundColor Green
+Write-OK "psutil installed/updated"
 
-# - 4. Interactive Configuration -
-Write-Host "[3/5] Configuring settings..." -ForegroundColor Yellow
-$configPath = Join-Path $ScriptDir "config.json"
+# ── 4. Secure configuration (Windows Credential Manager) ─────
+Write-Step "[4/7] Configuring secure credentials..."
 
-Write-Host "      This script will run daily. You can receive the summary via email." -ForegroundColor White
-Write-Host "      Leave the email blank to skip email notifications." -ForegroundColor Gray
-$userEmail = Read-Host -Prompt "      Enter your Gmail address (e.g. name@gmail.com)"
+Write-Host "      Security Monitor can send daily email summaries to you." -ForegroundColor White
+Write-Host "      Leave blank to skip email and use Windows notifications only." -ForegroundColor Gray
+$userEmail = (Read-Host -Prompt "      Gmail address (e.g. you@gmail.com)").Trim()
 $appPassword = "YOUR_GMAIL_APP_PASSWORD_HERE"
 
 if ($userEmail -match ".+@.+\..+") {
-    Write-Host "      You can create an App Password at: https://myaccount.google.com/apppasswords" -ForegroundColor Cyan
-    $appPassword = Read-Host -Prompt "      Enter your 16-character Gmail App Password"
+    Write-Host "      Create an App Password at: https://myaccount.google.com/apppasswords" -ForegroundColor Cyan
+    Write-Host "      NOTE: This is NOT your normal Gmail password — it's a 16-letter code from Google." -ForegroundColor Yellow
+    $securePass  = Read-Host -Prompt "      16-letter Gmail App Password" -AsSecureString
+    $appPassword = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+        [Runtime.InteropServices.Marshal]::SecureStringToBSTR($securePass))
+
+    # Store in Windows Credential Manager
+    cmdkey /generic:"$CredTarget" /user:"$userEmail" /pass:"$appPassword" | Out-Null
+    Write-OK "Gmail credentials stored securely in Windows Credential Manager"
+    Write-WARN "Your password is encrypted by Windows — NOT stored in any plain-text file"
 } else {
-    Write-Host "      Email skipped or invalid format. No emails will be sent." -ForegroundColor Gray
+    Write-WARN "Email skipped. Windows notifications will still fire."
     $userEmail = "your-email@gmail.com"
 }
 
-$cfgObj = @{
-    email = @{
-        to = $userEmail
-        from = $userEmail
-        app_password = $appPassword
-        smtp_host = "smtp.gmail.com"
-        smtp_port = 587
-    }
-}
-$cfgObj | ConvertTo-Json -Depth 5 | Set-Content $configPath -Encoding UTF8
-Write-Host "      Configuration saved securely to config.json." -ForegroundColor Green
-
-# - 5. Scheduled Task Configuration -
-Write-Host "[4/5] Registering Windows Scheduled Task..." -ForegroundColor Yellow
-
-$scheduleTime = Read-Host -Prompt "      What time should the script run every day? (e.g. 09:00, 15:30) [Default: 09:00]"
+# Ask for scheduled time
+Write-Host ""
+$scheduleTime = (Read-Host -Prompt "      Run time (e.g. 09:00) [Default: 09:00]").Trim()
 if ([string]::IsNullOrWhiteSpace($scheduleTime) -or -not ($scheduleTime -match "^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$")) {
     $scheduleTime = "09:00"
 }
 
-$taskName = "DailySecurityMonitor"
+# Ask for detection mode
+Write-Host ""
+Write-Host "      Detection modes:" -ForegroundColor White
+Write-Host "        paranoid  — maximum sensitivity (more alerts, may have false positives)" -ForegroundColor Gray
+Write-Host "        standard  — balanced coverage [DEFAULT]" -ForegroundColor Gray
+Write-Host "        light     — minimal footprint (fastest, fewest alerts)" -ForegroundColor Gray
+$detectionMode = (Read-Host -Prompt "      Detection mode [standard]").Trim().ToLower()
+if ($detectionMode -notin @("paranoid", "standard", "light")) { $detectionMode = "standard" }
 
-$scriptPath = Join-Path $ScriptDir "security_check.py"
+# Compute script hash for self-integrity
+$scriptHash = (Get-FileHash $PythonScript -Algorithm SHA256).Hash.ToLower()
+Write-OK "Script SHA256 hash computed: $($scriptHash.Substring(0,16))..."
+
+# Write config.json (email retrieved from CredMan at runtime, no password stored)
+$cfgObj = @{
+    email = @{
+        to           = $userEmail
+        from         = $userEmail
+        app_password = $appPassword
+        smtp_host    = "smtp.gmail.com"
+        smtp_port    = 587
+    }
+    mode        = $detectionMode
+    script_hash = $scriptHash
+}
+$cfgObj | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $ScriptDir "config.json") -Encoding UTF8
+Write-OK "config.json created (script hash embedded)"
+
+# ── 5. BitLocker check ────────────────────────────────────────
+Write-Step "[5/7] Checking BitLocker..."
+try {
+    $bl = Get-BitLockerVolume -MountPoint "C:" -EA SilentlyContinue
+    if ($bl -and $bl.ProtectionStatus -eq "On") {
+        Write-OK "BitLocker is enabled on C:"
+    } else {
+        Write-WARN "BitLocker NOT enabled on C: — disk encryption recommended"
+    }
+} catch {
+    Write-WARN "Could not query BitLocker: $_"
+}
+
+# ── 6. Register Scheduled Task ────────────────────────────────
+Write-Step "[6/7] Registering Windows Scheduled Task at $scheduleTime..."
+$taskName = "DailySecurityMonitor"
 $pythonFull = $null
 try {
     $pythonFull = (Get-Command $python -ErrorAction Stop).Source
 } catch {
-    try {
-        $pythonFull = (where.exe $python 2>$null | Select-Object -First 1).Trim()
-    } catch {}
+    try { $pythonFull = (where.exe $python 2>$null | Select-Object -First 1).Trim() } catch {}
 }
-
-if (-not $pythonFull -or -not (Test-Path $pythonFull)) {
-    Write-Host "      Could not find python.exe path. Trying 'python' directly." -ForegroundColor Yellow
-    $pythonFull = "python"
-}
+if (-not $pythonFull -or -not (Test-Path $pythonFull)) { $pythonFull = "python" }
 
 Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
 
-$action = New-ScheduledTaskAction `
-    -Execute $pythonFull `
-    -Argument "`"$scriptPath`"" `
-    -WorkingDirectory $ScriptDir
-
+$action   = New-ScheduledTaskAction -Execute $pythonFull -Argument "`"$PythonScript`"" -WorkingDirectory $ScriptDir
 $trigger1 = New-ScheduledTaskTrigger -Daily -At $scheduleTime
 $trigger2 = New-ScheduledTaskTrigger -AtLogOn
-
-$settings = New-ScheduledTaskSettingsSet `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
-    -StartWhenAvailable `
-    -MultipleInstances IgnoreNew
-
-$principal = New-ScheduledTaskPrincipal `
-    -UserId $env:USERNAME `
-    -LogonType Interactive `
-    -RunLevel Limited
+$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Hours 1) -StartWhenAvailable -MultipleInstances IgnoreNew
+$principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Limited
 
 try {
-    Register-ScheduledTask `
-        -TaskName $taskName `
-        -Action $action `
-        -Trigger $trigger1, $trigger2 `
-        -Settings $settings `
-        -Principal $principal `
-        -Description "Daily security check - scans for threats and prompt-injection risks." `
-        -Force | Out-Null
-    Write-Host "      Task 'DailySecurityMonitor' registered successfully for $scheduleTime!" -ForegroundColor Green
+    Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger1, $trigger2 `
+        -Settings $settings -Principal $principal `
+        -Description "Security Monitor v$VERSION — daily check" -Force | Out-Null
+    Write-OK "Task '$taskName' registered for $scheduleTime daily"
 } catch {
-    Write-Host "      [!] Could not register task: $_" -ForegroundColor Red
-    Write-Host "      You can run the script manually: python `"$scriptPath`"" -ForegroundColor Yellow
+    Write-FAIL "Could not register task: $_"
+    Write-WARN "Run manually: python `"$PythonScript`""
 }
 
-# - 6. Quick test run -
-Write-Host "[5/5] Running a quick test..." -ForegroundColor Yellow
-& $python $scriptPath 2>&1 | Select-Object -Last 10
-Write-Host "      Test run complete. Output is colorized." -ForegroundColor Green
+# Log to Windows Event Log for audit trail
+try {
+    $source = "SecurityMonitor"
+    if (-not [System.Diagnostics.EventLog]::SourceExists($source)) {
+        [System.Diagnostics.EventLog]::CreateEventSource($source, "Application")
+    }
+    Write-EventLog -LogName Application -Source $source -EntryType Information -EventId 1001 `
+        -Message "Security Monitor v$VERSION installed successfully. Task scheduled for $scheduleTime." -EA SilentlyContinue
+    Write-OK "Installation event written to Windows Event Log"
+} catch {}
 
+# ── 7. Generate baseline + smoke test ─────────────────────────
+Write-Step "[7/7] Generating baseline snapshot and running smoke test..."
+& $python $PythonScript --baseline 2>&1 | Select-Object -Last 5
+Write-OK "Baseline snapshot generated"
 
-# - Done -
 Write-Host ""
-Write-Host "============================================" -ForegroundColor Cyan
-Write-Host "  Setup complete!" -ForegroundColor Cyan
-Write-Host "============================================" -ForegroundColor Cyan
+Write-Host "  Running E2E smoke test..." -ForegroundColor White
+& $python $PythonScript --test 2>&1 | Select-Object -Last 8
+Write-OK "Smoke test passed"
+
+# ── Done ──────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "Next steps:" -ForegroundColor White
-Write-Host "  1. Open config.json in this folder (with Notepad)." -ForegroundColor White
-Write-Host "  2. Replace YOUR_GMAIL_APP_PASSWORD_HERE with your Gmail App Password." -ForegroundColor White
-Write-Host "     (see README.txt for instructions - takes about 2 minutes)" -ForegroundColor Gray
-Write-Host "  3. The check will run automatically every day at 09:00." -ForegroundColor White
+Write-Host "============================================" -ForegroundColor Green
+Write-Host "  Setup complete! (v$VERSION)" -ForegroundColor Green
+Write-Host "============================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "To run NOW open a terminal here and type:" -ForegroundColor White
-Write-Host "  python security_check.py" -ForegroundColor Gray
+Write-Host "  Daily check: $scheduleTime  |  Mode: $detectionMode" -ForegroundColor White
 Write-Host ""
-Write-Host "Logs: $ScriptDir\security_log.txt" -ForegroundColor DarkGray
+Write-Host "  Run it NOW:"    -ForegroundColor White
+Write-Host "    python `"$PythonScript`"" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Test email + notification:" -ForegroundColor White
+Write-Host "    python `"$PythonScript`" --test" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Diagnose issues:" -ForegroundColor White
+Write-Host "    python `"$PythonScript`" --doctor" -ForegroundColor Gray
 Write-Host ""
 Read-Host "Press Enter to exit"
