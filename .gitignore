@@ -1,4 +1,9 @@
 config.json
 security_log.txt
+security_log.json
+baseline.json
+task.txt
+*.pyc
+__pycache__/
 __pycache__/
 .env

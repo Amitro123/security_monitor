@@ -46,7 +46,7 @@ except ImportError:
 # ============================================================
 # CONFIGURATION
 # ============================================================
-VERSION     = "2.0.0"
+VERSION     = "2.1.0"
 BASE_DIR    = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 LOG_FILE    = BASE_DIR / "security_log.txt"
@@ -78,7 +78,44 @@ class Colors:
     RED    = '\033[91m'
     CYAN   = '\033[96m'
     BOLD   = '\033[1m'
+    DIM    = '\033[2m'
+    WHITE  = '\033[97m'
     RESET  = '\033[0m'
+
+# ── Permission explanations (human-readable) ────────────────────────────────
+PERM_EXPLANATIONS = {
+    "nativeMessaging":       "can run programs on your PC outside the browser",
+    "debugger":              "can inspect and modify any website you visit",
+    "proxy":                 "can redirect all your web traffic through another server",
+    "webRequest":            "can intercept and read every network request your browser makes",
+    "webRequestBlocking":    "can block or modify network requests in real-time",
+    "clipboardRead":         "can silently read everything you copy to clipboard",
+    "clipboardWrite":        "can inject text into your clipboard",
+    "cookies":               "can read your login cookies for all websites",
+    "history":               "can read your full browsing history",
+    "bookmarks":             "can read and modify your saved bookmarks",
+    "management":            "can install/remove other Chrome extensions",
+    "downloads":             "can read and manage your downloads",
+}
+
+# ── CTA templates per check ──────────────────────────────────────────────────
+CTA_MAP = {
+    "Chrome Extensions":     "👉 Fix: Open chrome://extensions → Find the extension → Toggle OFF or click Remove",
+    "Startup Items":         "👉 Fix: Open Task Manager (Ctrl+Shift+Esc) → Startup tab → Right-click → Disable",
+    "Startup Folders":       "👉 Fix: Open Run (Win+R) → shell:startup → Delete the suspicious file",
+    "Running Processes":     "👉 Fix: Open Task Manager → find the process → End Task, then check its file location",
+    "Network Connections":   "👉 Fix: Identify the process via Task Manager, terminate it, then run a full AV scan",
+    "Hosts File":            "👉 Fix: Open Notepad as Admin → Open C:\\Windows\\System32\\drivers\\etc\\hosts → Remove suspicious lines",
+    "Windows Defender":      "👉 Fix: Start → Windows Security → Virus & threat protection → Turn on Real-time protection",
+    "Scheduled Tasks":       "👉 Fix: Open Task Scheduler (taskschd.msc) → find the task → right-click → Delete",
+    "Windows Services":      "👉 Fix: Open services.msc → find the service → right-click → Stop, then set to Disabled",
+    "WMI Persistence":       "👉 Fix: Open PowerShell as Admin → Get-WMIObject -Namespace root\\subscription -Class __EventFilter | Remove-WmiObject",
+    "PowerShell Profiles":   "👉 Fix: Open the profile file shown above in Notepad → remove the suspicious line",
+    "BITS Jobs":             "👉 Fix: Open PowerShell → Get-BitsTransfer -AllUsers | Remove-BitsTransfer",
+    "AI Tool Configs / MCP": "👉 Fix: Review the file listed above and remove any suspicious prompt overrides",
+    "Self-Integrity":        "👉 Fix: Re-run setup.ps1 as Administrator to restore the scheduled task and rehash the script",
+    "Event Log Audit":       "👉 Fix: Review the Windows Security Event Log via eventvwr.msc for full context",
+}
 
 # ── Threat signatures ────────────────────────────────────────────────────────
 SUSPICIOUS_PROCESS_PATTERNS = [
@@ -1085,6 +1122,265 @@ def generate_baseline() -> dict:
 
 
 # ============================================================
+# DASHBOARD RENDERER
+# ============================================================
+
+def _score_findings(all_findings: dict) -> int:
+    """Calculate a 0-100 security score. 100 = clean, 0 = critical."""
+    deductions = {P0: 25, P1: 15, P2: 5, P3: 1}
+    total_deducted = sum(
+        deductions.get(sev, 0)
+        for findings in all_findings.values()
+        for sev, _ in findings
+    )
+    return max(0, 100 - total_deducted)
+
+
+def _score_bar(score: int) -> str:
+    """Render a colored ASCII risk bar."""
+    filled = score // 5        # 0-20 blocks
+    empty  = 20 - filled
+    if score >= 80:
+        color = Colors.GREEN
+    elif score >= 50:
+        color = Colors.YELLOW
+    else:
+        color = Colors.RED
+    bar = "█" * filled + "░" * empty
+    return f"{color}{bar}{Colors.RESET}"
+
+
+def _sev_emoji(sev: str) -> str:
+    return {P0: "🔴", P1: "🔴", P2: "🟡", P3: "🔵", INFO: "🟢"}.get(sev, "⚪")
+
+
+def _explain_finding(check_name: str, sev: str, msg: str) -> str:
+    """Return a human-readable 'Why risky?' explanation for a finding."""
+    msg_lower = msg.lower()
+    # Chrome extension explanations
+    if check_name == "Chrome Extensions":
+        for perm, expl in PERM_EXPLANATIONS.items():
+            if perm.lower() in msg_lower:
+                return f"Why risky? This extension {expl}."
+        if "malicious" in msg_lower:
+            return "Why risky? This extension ID is flagged in known malware databases."
+        if "baseline" in msg_lower:
+            return "Why risky? An extension was installed since your last security baseline — verify you installed it."
+    if check_name == "Startup Items":
+        if "risky location" in msg_lower:
+            return "Why risky? Legitimate apps don't usually start from Temp or Downloads folders — this is a common malware trick."
+        if "baseline" in msg_lower:
+            return "Why risky? A new program was added to auto-start since your last check. Verify you authorised it."
+    if check_name == "Running Processes":
+        return "Why risky? This process name matches known hacking tools (cryptominers, RATs, or C2 frameworks)."
+    if check_name == "Network Connections":
+        if "tor" in msg_lower:
+            return "Why risky? This IP prefix is associated with the TOR anonymity network — often used to hide malicious traffic."
+        return "Why risky? This port is commonly used by Metasploit, botnets, or remote-access backdoors."
+    if check_name == "Hosts File":
+        return "Why risky? Your browser is being redirected away from a trusted domain — attackers use this to steal passwords."
+    if check_name == "WMI Persistence":
+        return "Why risky? WMI subscriptions run silently in the background and survive reboots — a favourite APT persistence mechanism."
+    if check_name == "Windows Defender":
+        if "disabled" in msg_lower:
+            return "Why risky? Without Real-time Protection your PC has no active malware shield."
+        if "exclusion" in msg_lower:
+            return "Why risky? Attackers add Defender exclusions to hide their malware from scans."
+    if check_name == "Self-Integrity":
+        return "Why risky? The security script itself may have been modified to hide threats from you."
+    if check_name == "Event Log Audit":
+        if "4625" in msg or "failed logon" in msg_lower:
+            return "Why risky? Repeated failed logins may indicate a brute-force attack against your account."
+        if "4720" in msg or "user account created" in msg_lower:
+            return "Why risky? A new Windows user account was created — this is a common backdoor persistence method."
+    return ""
+
+
+def render_dashboard(
+    all_findings: dict,
+    summaries: dict,
+    scan_duration: float,
+    is_test: bool = False,
+):
+    """Print the full Security Dashboard to the console."""
+    score  = _score_findings(all_findings)
+    ts     = datetime.datetime.now().strftime("%Y-%m-%d  %H:%M")
+    W      = 60  # box width
+
+    high_findings   = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev in (P0, P1)]
+    medium_findings = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P2]
+    low_findings    = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P3]
+    ok_checks       = [chk for chk, fs in all_findings.items() if not fs]
+
+    test_banner = "  ⚠️  TEST MODE — simulated data  ⚠️" if is_test else ""
+
+    # ── Header ──────────────────────────────────────────────
+    print()
+    print(f"{Colors.BOLD}{Colors.CYAN}╔{'═' * W}╗{Colors.RESET}")
+    title = f"🛡️  Security Monitor v{VERSION} — Daily Report"
+    print(f"{Colors.BOLD}{Colors.CYAN}║  {title:<57}║{Colors.RESET}")
+    sub   = f"{ts}  |  Scan: {scan_duration:.1f}s"
+    print(f"{Colors.BOLD}{Colors.CYAN}║  {sub:<57}║{Colors.RESET}")
+    if test_banner:
+        print(f"{Colors.BOLD}{Colors.YELLOW}║  {test_banner:<57}║{Colors.RESET}")
+    print(f"{Colors.BOLD}{Colors.CYAN}╚{'═' * W}╝{Colors.RESET}")
+    print()
+
+    # ── Risk Score ──────────────────────────────────────────
+    score_label = f"{score}/100"
+    if score == 100:
+        score_color, rating = Colors.GREEN, "CLEAN ✅"
+    elif score >= 75:
+        score_color, rating = Colors.GREEN, "GOOD"
+    elif score >= 50:
+        score_color, rating = Colors.YELLOW, "REVIEW NEEDED"
+    elif score >= 25:
+        score_color, rating = Colors.RED, "AT RISK ⚠️"
+    else:
+        score_color, rating = Colors.RED, "CRITICAL 🚨"
+
+    print(f"  {Colors.BOLD}SECURITY SCORE:{Colors.RESET}  {score_color}{Colors.BOLD}{score_label}{Colors.RESET}  {_score_bar(score)}  {score_color}{rating}{Colors.RESET}")
+    print(f"  {Colors.DIM}{len(high_findings)} high · {len(medium_findings)} medium · {len(low_findings)} low · {len(ok_checks)}/{len(all_findings)} checks clean{Colors.RESET}")
+    print()
+
+    # ── HIGH section ────────────────────────────────────────
+    if high_findings:
+        print(f"  {Colors.RED}{Colors.BOLD}🔴 HIGH  ({len(high_findings)} issue{'s' if len(high_findings) != 1 else ''}){Colors.RESET}")
+        for chk, sev, msg in high_findings:
+            expl = _explain_finding(chk, sev, msg)
+            cta  = CTA_MAP.get(chk, "")
+            print(f"  {Colors.RED}┌{'─' * (W - 2)}┐{Colors.RESET}")
+            # Wrap the message
+            for i, chunk in enumerate([msg[j:j+54] for j in range(0, max(len(msg), 1), 54)]):
+                prefix = f"  {Colors.RED}│{Colors.RESET} [{chk}]  " if i == 0 else f"  {Colors.RED}│{Colors.RESET}          "
+                print(f"{prefix}{Colors.WHITE}{chunk}{Colors.RESET}")
+            if expl:
+                print(f"  {Colors.RED}│{Colors.RESET}  {Colors.DIM}{expl}{Colors.RESET}")
+            if cta:
+                print(f"  {Colors.RED}│{Colors.RESET}  {Colors.CYAN}{cta}{Colors.RESET}")
+            print(f"  {Colors.RED}└{'─' * (W - 2)}┘{Colors.RESET}")
+        print()
+
+    # ── MEDIUM section ──────────────────────────────────────
+    if medium_findings:
+        print(f"  {Colors.YELLOW}{Colors.BOLD}🟡 MEDIUM  ({len(medium_findings)} item{'s' if len(medium_findings) != 1 else ''}){Colors.RESET}")
+        for chk, sev, msg in medium_findings:
+            expl = _explain_finding(chk, sev, msg)
+            cta  = CTA_MAP.get(chk, "")
+            short_msg = msg if len(msg) <= 55 else msg[:52] + "..."
+            print(f"    {Colors.YELLOW}•{Colors.RESET} {Colors.WHITE}{short_msg}{Colors.RESET}")
+            if expl:
+                print(f"      {Colors.DIM}{expl}{Colors.RESET}")
+            if cta:
+                print(f"      {Colors.CYAN}{cta}{Colors.RESET}")
+        print()
+
+    # ── LOW section ─────────────────────────────────────────
+    if low_findings:
+        print(f"  {Colors.CYAN}{Colors.BOLD}🔵 LOW  ({len(low_findings)} item{'s' if len(low_findings) != 1 else ''}){Colors.RESET}")
+        for chk, sev, msg in low_findings:
+            short_msg = msg if len(msg) <= 55 else msg[:52] + "..."
+            print(f"    {Colors.CYAN}•{Colors.RESET} {Colors.DIM}{short_msg}{Colors.RESET}")
+        print()
+
+    # ── OK checks ───────────────────────────────────────────
+    if ok_checks:
+        ok_line = "  ".join(f"✅ {c}" for c in ok_checks)
+        print(f"  {Colors.GREEN}{Colors.BOLD}🟢 CLEAN{Colors.RESET}")
+        # Print ok checks in lines of max ~56 chars
+        line_buf = "    "
+        for chk in ok_checks:
+            token = f"✅ {chk}  "
+            if len(line_buf) + len(token) > 58:
+                print(f"{Colors.GREEN}{line_buf}{Colors.RESET}")
+                line_buf = "    "
+            line_buf += token
+        if line_buf.strip():
+            print(f"{Colors.GREEN}{line_buf}{Colors.RESET}")
+        print()
+
+    # ── Footer ──────────────────────────────────────────────
+    print(f"{Colors.DIM}  Log: {LOG_FILE}  |  JSON: {JSON_LOG}{Colors.RESET}")
+    print()
+
+
+# ── Interactive --fix wizard ────────────────────────────────────────────────
+def run_fix_wizard(all_findings: dict):
+    """Interactively walk the user through each High finding with a fix CTA."""
+    high_findings = [
+        (chk, sev, msg)
+        for chk, fs in all_findings.items()
+        for sev, msg in fs
+        if sev in (P0, P1)
+    ]
+    if not high_findings:
+        print(f"  {Colors.GREEN}No high-severity findings to fix — you're all clear!{Colors.RESET}")
+        return
+
+    print(f"\n{Colors.BOLD}{Colors.RED}  🔧 FIX WIZARD — {len(high_findings)} high-severity issue(s){Colors.RESET}")
+    print(f"  {Colors.DIM}Walk through each finding one at a time.{Colors.RESET}\n")
+
+    for i, (chk, sev, msg) in enumerate(high_findings, 1):
+        cta  = CTA_MAP.get(chk, "Manual review required")
+        expl = _explain_finding(chk, sev, msg)
+        print(f"  {Colors.BOLD}[{i}/{len(high_findings)}] {chk}{Colors.RESET}")
+        print(f"  {Colors.RED}  Issue:  {msg}{Colors.RESET}")
+        if expl:
+            print(f"  {Colors.DIM}  Why?    {expl}{Colors.RESET}")
+        print(f"  {Colors.CYAN}  Action: {cta}{Colors.RESET}")
+        print()
+        try:
+            ans = input(f"  Mark as resolved and continue? [Y/n] → ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Fix wizard cancelled.")
+            return
+        if ans in ("n", "no"):
+            print(f"  {Colors.YELLOW}  Skipped — will appear again in next scan.{Colors.RESET}")
+        else:
+            print(f"  {Colors.GREEN}  ✅ Marked for review. Remember to perform the action above!{Colors.RESET}")
+        print()
+
+    print(f"  {Colors.GREEN}Fix wizard complete. Re-run the scan after applying fixes.{Colors.RESET}\n")
+
+
+# ── Interactive --baseline-update wizard ─────────────────────────────────────
+def run_baseline_update(all_findings: dict, baseline_data: dict):
+    """Show drift findings and let the user approve new items into the baseline."""
+    drift_findings = [
+        (chk, msg)
+        for chk, fs in all_findings.items()
+        for sev, msg in fs
+        if "baseline" in msg.lower() or "since baseline" in msg.lower()
+    ]
+    if not drift_findings:
+        print(f"  {Colors.GREEN}  No baseline drift detected — nothing to approve.{Colors.RESET}")
+        return
+
+    print(f"\n{Colors.BOLD}{Colors.YELLOW}  📋 BASELINE UPDATE — {len(drift_findings)} new item(s) detected{Colors.RESET}")
+    print(f"  {Colors.DIM}Approve items that YOU installed to suppress future alerts.{Colors.RESET}\n")
+
+    approved = []
+    for i, (chk, msg) in enumerate(drift_findings, 1):
+        print(f"  [{i}/{len(drift_findings)}] {Colors.BOLD}{chk}{Colors.RESET}: {msg}")
+        try:
+            ans = input("  Did YOU install/create this? Approve it? [Y/n] → ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Baseline update cancelled.")
+            return
+        if ans not in ("n", "no"):
+            approved.append((chk, msg))
+            print(f"  {Colors.GREEN}  ✅ Approved — baseline will be regenerated.{Colors.RESET}")
+        else:
+            print(f"  {Colors.RED}  ⚠️  Flagged — keep investigating this item!{Colors.RESET}")
+        print()
+
+    if approved:
+        print(f"  {Colors.YELLOW}  Regenerating baseline to include {len(approved)} approved item(s)...{Colors.RESET}")
+        generate_baseline()
+        print(f"  {Colors.GREEN}  ✅ Baseline updated. These items won't trigger alerts next scan.{Colors.RESET}\n")
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -1099,9 +1395,11 @@ Examples:
   python security_check.py --baseline    # Regenerate system baseline
         """
     )
-    parser.add_argument("--test",     action="store_true", help="Run E2E test with 5 simulated threats")
-    parser.add_argument("--doctor",   action="store_true", help="Diagnose common installation issues")
-    parser.add_argument("--baseline", action="store_true", help="Regenerate the baseline.json snapshot")
+    parser.add_argument("--test",            action="store_true", help="Run E2E test with 5 simulated threats")
+    parser.add_argument("--doctor",           action="store_true", help="Diagnose common installation issues")
+    parser.add_argument("--baseline",         action="store_true", help="Regenerate the baseline.json snapshot")
+    parser.add_argument("--fix",              action="store_true", help="Interactive wizard to fix high-severity findings")
+    parser.add_argument("--baseline-update",  action="store_true", help="Approve new baseline items interactively")
     args = parser.parse_args()
 
     log("=" * 60)
@@ -1178,30 +1476,31 @@ Examples:
 
     # ── Test Mode ──────────────────────────────────────────────────────────────
     if args.test:
-        log("  > RUNNING IN TEST MODE — simulating 5 threat types...", P2)
+        t0 = datetime.datetime.now()
         all_findings = {
-            "Simulated: Miner Process":     [(P0, "CRITICAL – fake_miner.exe (PID 9999) — C:\\temp\\fake_miner.exe")],
-            "Simulated: Malicious Extension": [(P0, "CRITICAL – Known malicious extension: FakeSpyware (bcjindcccaagfpapjjmafapmmgkkhgoa)")],
-            "Simulated: WMI Persistence":   [(P0, "CRITICAL – WMI CommandLineEventConsumer: 'EvilPersist' — cmd /c powershell -e <payload>")],
-            "Simulated: Rogue Service":     [(P1, "HIGH – New service from risky path: evil_svc -> C:\\users\\public\\evil.exe")],
-            "Simulated: Startup Item":      [(P1, "HIGH – New startup folder item since baseline: autorun_payload.lnk")],
+            "Chrome Extensions":   [(P0, "Known malicious extension: FakeSpyware (bcjindcccaagfpapjjmafapmmgkkhgoa)")],
+            "Running Processes":   [(P0, "Suspicious process: fake_miner.exe (PID 9999) — C:\\temp\\fake_miner.exe")],
+            "WMI Persistence":     [(P0, "Suspicious WMI Consumer: 'EvilPersist' — cmd /c powershell -e <payload>")],
+            "Windows Services":    [(P1, "Service running from risky path: evil_svc -> C:\\users\\public\\evil.exe")],
+            "Startup Folders":     [(P1, "New startup folder item since baseline: C:\\Users\\Public\\autorun_payload.lnk")],
+            "Hosts File":          [],
+            "Network Connections": [],
+            "Windows Defender":    [],
+            "Scheduled Tasks":     [],
+            "AI Tool Configs / MCP": [],
         }
-        summaries = {k: "TEST ALERT" for k in all_findings}
+        summaries = {k: "TEST" for k in all_findings}
         for check, findings in all_findings.items():
             for sev, msg in findings:
-                log(f"    {msg}", sev)
                 json_log(check, sev, msg)
-
-        log("=" * 60)
-        log("WARNING: 5 simulated issue(s) detected — this is a test.", P2)
+        duration = (datetime.datetime.now() - t0).total_seconds()
+        render_dashboard(all_findings, summaries, duration, is_test=True)
         send_windows_notification(
-            "Security Alert — 5 issue(s) found  [TEST]",
-            "Test mode active. Click to open log and verify notification works!"
+            "Security Alert — 5 issue(s) [TEST]",
+            "Test mode active. Click to open log!"
         )
         send_email_report(config, all_findings, summaries)
-        log("=" * 60)
-        log("Security Monitor Test — done.")
-        log("")
+        log("Security Monitor Test — done.", INFO)
         return 1
 
     # ── Full Scan ──────────────────────────────────────────────────────────────
@@ -1226,8 +1525,9 @@ Examples:
     all_findings: dict = {}
     summaries:    dict = {}
 
+    t0 = datetime.datetime.now()
     for check_name, check_fn in checks:
-        log(f"  > {check_name} ...", INFO)
+        print(f"  {Colors.DIM}  ▸ {check_name}...{Colors.RESET}", end="\r")
         try:
             findings, summary = check_fn()
         except Exception as ex:
@@ -1235,31 +1535,44 @@ Examples:
 
         all_findings[check_name] = findings
         summaries[check_name]    = summary
-        log(f"    -> {summary}", INFO)
-        for sev, f in findings:
-            log(f"    {f}", sev)
+        # Also write to log file silently
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with open(LOG_FILE, "a", encoding="utf-8") as lf:
+            lf.write(f"[{ts}] {check_name}: {summary}\n")
+            for sev, f in findings:
+                lf.write(f"[{ts}]   [{sev}] {f}\n")
+                json_log(check_name, sev, f)
 
+    # Clear the progress line
+    print(" " * 60, end="\r")
+
+    duration       = (datetime.datetime.now() - t0).total_seconds()
     critical_count = sum(1 for v in all_findings.values() for sev, _ in v if sev in (P0, P1))
     total          = sum(len(v) for v in all_findings.values())
 
-    log("=" * 60)
+    render_dashboard(all_findings, summaries, duration)
+
+    # ── Notification ───────────────────────────────────────
     if total == 0:
-        log("ALL CHECKS PASSED — no issues found.", INFO)
         send_windows_notification(
             "Security Check Passed ✅",
-            f"Daily check complete — no issues found. ({datetime.datetime.now().strftime('%H:%M')})"
+            f"All 15 checks clean. Score: 100/100 ({datetime.datetime.now().strftime('%H:%M')})"
         )
     else:
-        log(f"WARNING: {total} potential issue(s) detected ({critical_count} HIGH/CRITICAL) — review the log.", P0)
+        score = _score_findings(all_findings)
         send_windows_notification(
-            f"Security Alert — {total} issue(s) found",
-            f"{critical_count} critical/high severity. Click to open security_log.txt!"
+            f"🔴 Security Alert — {total} issue(s) — Score: {score}/100",
+            f"{critical_count} high/critical severity. Click to open log!"
         )
 
     send_email_report(config, all_findings, summaries)
-    log("=" * 60)
-    log("Security Monitor — done.")
-    log("")
+
+    # ── Optional post-scan modes ───────────────────────────
+    if args.fix:
+        run_fix_wizard(all_findings)
+    if args.baseline_update:
+        run_baseline_update(all_findings, baseline_data)
+
     return 0 if total == 0 else 1
 
 
