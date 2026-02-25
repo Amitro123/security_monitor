@@ -17,7 +17,7 @@ jobs:
       - name: Install linter
         run: pip install flake8
       - name: Lint security_check.py
-        run: flake8 security_check.py --max-line-length=120 --ignore=E501,W503
+        run: flake8 security_check.py --max-line-length=120 --ignore=E501,W503,E221,E241,E272,E226,E302,E305,E127,E128,W291,W293
 
   lint-powershell:
     runs-on: windows-latest

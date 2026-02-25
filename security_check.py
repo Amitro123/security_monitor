@@ -17,8 +17,6 @@ import smtplib
 import re
 import hashlib
 import argparse
-import ctypes
-import struct
 from pathlib import Path
 from collections import defaultdict
 from email.mime.text import MIMEText
@@ -1285,7 +1283,6 @@ def render_dashboard(
 
     # ── OK checks ───────────────────────────────────────────
     if ok_checks:
-        ok_line = "  ".join(f"✅ {c}" for c in ok_checks)
         print(f"  {Colors.GREEN}{Colors.BOLD}🟢 CLEAN{Colors.RESET}")
         # Print ok checks in lines of max ~56 chars
         line_buf = "    "
@@ -1330,7 +1327,7 @@ def run_fix_wizard(all_findings: dict):
         print(f"  {Colors.CYAN}  Action: {cta}{Colors.RESET}")
         print()
         try:
-            ans = input(f"  Mark as resolved and continue? [Y/n] → ").strip().lower()
+            ans = input("  Mark as resolved and continue? [Y/n] → ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             print("\n  Fix wizard cancelled.")
             return
@@ -1369,7 +1366,7 @@ def run_baseline_update(all_findings: dict, baseline_data: dict):
             return
         if ans not in ("n", "no"):
             approved.append((chk, msg))
-            print(f"  {Colors.GREEN}  ✅ Approved — baseline will be regenerated.{Colors.RESET}")
+            print(f"  {Colors.GREEN}  Approved - baseline will be regenerated.{Colors.RESET}")
         else:
             print(f"  {Colors.RED}  ⚠️  Flagged — keep investigating this item!{Colors.RESET}")
         print()
