@@ -74,11 +74,17 @@ DEFAULT_CONFIG = {
 }
 
 # ── Severity Levels ──────────────────────────────────────────────────────────
-P0   = "CRITICAL"
-P1   = "HIGH"
-P2   = "MEDIUM"
-P3   = "LOW"
-INFO = "INFO"
+P0        = "CRITICAL"
+P1        = "HIGH"
+P2        = "MEDIUM"
+P3        = "LOW"
+AUTOMATION = "AUTOMATION"
+INFO      = "INFO"
+
+# Automation tool name keywords — these extensions get the AUTOMATION category
+AUTOMATION_KEYWORDS = ("claude", "automation", "ai assistant", "copilot", "openai", "chatgpt")
+# Automation tool permission fingerprint (must have all three)
+AUTOMATION_PERMS    = {"debugger", "nativeMessaging", "downloads"}
 
 class Colors:
     GREEN  = '\033[92m'
@@ -299,11 +305,21 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 # ============================================================
 
 # ── 1. Chrome Extensions ─────────────────────────────────────────────────────
+def _ext_source(manifest: dict) -> str:
+    """Detect whether the extension was installed from the Chrome Web Store."""
+    update_url = manifest.get("update_url", "")
+    if "clients2.google.com" in update_url or "chrome.google.com" in update_url:
+        return "Chrome Web Store"
+    if update_url:
+        return f"Unknown ({update_url[:50]})"
+    return "Unknown (no update URL)"
+
+
 def check_chrome_extensions(baseline: dict, config: dict):
-    findings = []
-    mode     = config.get("mode", "standard")
-    username = os.environ.get("USERNAME", os.environ.get("USER", ""))
-    ext_root = Path(f"C:/Users/{username}/AppData/Local/Google/Chrome/User Data")
+    findings   = []
+    mode       = config.get("mode", "standard")
+    username   = os.environ.get("USERNAME", os.environ.get("USER", ""))
+    ext_root   = Path(f"C:/Users/{username}/AppData/Local/Google/Chrome/User Data")
 
     if not ext_root.exists():
         return findings, "Chrome not found on this machine"
@@ -311,7 +327,7 @@ def check_chrome_extensions(baseline: dict, config: dict):
     profiles   = [ext_root / "Default"] + list(ext_root.glob("Profile *"))
     total_exts = 0
     suspicious = 0
-    found_ids  = set()
+    seen_ids   = set()   # ← dedup: skip if we already processed this extension ID
 
     for profile in profiles:
         ext_dir = profile / "Extensions"
@@ -320,7 +336,12 @@ def check_chrome_extensions(baseline: dict, config: dict):
         for ext_folder in ext_dir.iterdir():
             if not ext_folder.is_dir():
                 continue
-            ext_id       = ext_folder.name
+            ext_id = ext_folder.name
+
+            # Rule 1 — Deduplicate across profiles
+            if ext_id in seen_ids:
+                continue
+
             version_dirs = sorted(ext_folder.iterdir(), reverse=True)
             for vdir in version_dirs:
                 manifest_path = vdir / "manifest.json"
@@ -332,36 +353,62 @@ def check_chrome_extensions(baseline: dict, config: dict):
                     break
 
                 total_exts += 1
-                found_ids.add(ext_id)
+                seen_ids.add(ext_id)
                 name       = manifest.get("name", ext_id)
                 perms      = set(manifest.get("permissions", []))
                 host_perms = manifest.get("host_permissions", []) + manifest.get("permissions", [])
+                source     = _ext_source(manifest)
 
+                # Known malicious — always P0 regardless of other rules
                 if ext_id in KNOWN_MALICIOUS_EXTENSIONS:
                     suspicious += 1
-                    msg = f"Known malicious extension: {name} ({ext_id})"
+                    msg = f"Known malicious extension: {name} ({ext_id}) [Source: {source}]"
                     findings.append((P0, msg))
                     json_log("Chrome Extensions", P0, msg, {"ext_id": ext_id})
                     break
 
                 danger_found = perms & DANGEROUS_CHROME_PERMISSIONS
-                all_urls = any(h in ("<all_urls>", "*://*/*", "http://*/*") for h in host_perms)
-                threshold = 2 if mode == "paranoid" else 3
+                all_urls     = any(h in ("<all_urls>", "*://*/*", "http://*/*") for h in host_perms)
+                threshold    = 2 if mode == "paranoid" else 3
+
                 if len(danger_found) >= threshold and all_urls:
-                    suspicious += 1
-                    msg = f"High-risk extension: '{name}' [{', '.join(sorted(danger_found))}] + all-URL access"
-                    findings.append((P1, msg))
-                    json_log("Chrome Extensions", P1, msg, {"ext_id": ext_id})
+                    # Rule 2 — Automation tools: do NOT flag as HIGH
+                    name_lower = name.lower()
+                    is_automation = (
+                        any(kw in name_lower for kw in AUTOMATION_KEYWORDS)
+                        and AUTOMATION_PERMS.issubset(perms)
+                    )
+                    if is_automation:
+                        msg = (f"Automation tool: '{name}' [{', '.join(sorted(danger_found))}]"
+                               f" [Source: {source}]")
+                        findings.append((AUTOMATION, msg))
+                        json_log("Chrome Extensions", AUTOMATION, msg, {"ext_id": ext_id})
+
+                    else:
+                        suspicious += 1
+                        # Rule 3 — PDF/web-capture: keep HIGH but update CTA
+                        is_pdf_capture = (
+                            "nativeMessaging" in danger_found
+                            and "webRequest" in danger_found
+                            and all_urls
+                        )
+                        cta_note = (" Verify the installation source on the Chrome Web Store before removing."
+                                    if is_pdf_capture else "")
+                        # Rule 4 — Embed source in message
+                        msg = (f"High-risk extension: '{name}' [{', '.join(sorted(danger_found))}]"
+                               f" + all-URL access [Source: {source}].{cta_note}")
+                        findings.append((P1, msg))
+                        json_log("Chrome Extensions", P1, msg, {"ext_id": ext_id})
 
                 # Baseline drift — new extension since last scan
                 bl_exts = set(baseline.get("chrome_extensions", []))
                 if bl_exts and ext_id not in bl_exts:
-                    msg = f"New extension since baseline: '{name}' ({ext_id})"
+                    msg = f"New extension since baseline: '{name}' ({ext_id}) [Source: {source}]"
                     findings.append((P2, msg))
                     json_log("Chrome Extensions", P2, msg, {"ext_id": ext_id})
                 break
 
-    summary = f"{total_exts} extensions found" + (f", {suspicious} suspicious" if suspicious else " – OK")
+    summary = f"{total_exts} extensions checked" + (f", {suspicious} suspicious" if suspicious else " – OK")
     return findings, summary
 
 
@@ -1239,9 +1286,11 @@ def render_dashboard(
     high_findings   = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev in (P0, P1)]
     medium_findings = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P2]
     low_findings    = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P3]
-    ok_checks       = [chk for chk, fs in all_findings.items() if not fs]
+    auto_findings   = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == AUTOMATION]
+    ok_checks       = [chk for chk, fs in all_findings.items() if not any(s != AUTOMATION for s, _ in fs)]
 
     test_banner = "  ⚠️  TEST MODE — simulated data  ⚠️" if is_test else ""
+    total_real  = len(high_findings) + len(medium_findings) + len(low_findings)
 
     # ── Header ──────────────────────────────────────────────
     print()
@@ -1255,7 +1304,7 @@ def render_dashboard(
     print(f"{Colors.BOLD}{Colors.CYAN}╚{'═' * W}╝{Colors.RESET}")
     print()
 
-    # ── Risk Score ──────────────────────────────────────────
+    # ── Risk Score (excludes AUTOMATION findings from score) ────────────
     score_label = f"{score}/100"
     if score == 100:
         score_color, rating = Colors.GREEN, "CLEAN ✅"
@@ -1269,7 +1318,7 @@ def render_dashboard(
         score_color, rating = Colors.RED, "CRITICAL 🚨"
 
     print(f"  {Colors.BOLD}SECURITY SCORE:{Colors.RESET}  {score_color}{Colors.BOLD}{score_label}{Colors.RESET}  {_score_bar(score)}  {score_color}{rating}{Colors.RESET}")
-    print(f"  {Colors.DIM}{len(high_findings)} high · {len(medium_findings)} medium · {len(low_findings)} low · {len(ok_checks)}/{len(all_findings)} checks clean{Colors.RESET}")
+    print(f"  {Colors.DIM}{len(high_findings)} high · {len(medium_findings)} medium · {len(low_findings)} low · {len(auto_findings)} automation · {len(ok_checks)}/{len(all_findings)} checks clean{Colors.RESET}")
     print()
 
     # ── HIGH section ────────────────────────────────────────
@@ -1302,6 +1351,15 @@ def render_dashboard(
                 print(f"      {Colors.DIM}{expl}{Colors.RESET}")
             if cta:
                 print(f"      {Colors.CYAN}{cta}{Colors.RESET}")
+        print()
+
+    # ── AUTOMATION section ──────────────────────────────────────
+    if auto_findings:
+        print(f"  {Colors.CYAN}{Colors.BOLD}⚙️  AUTOMATION TOOLS  ({len(auto_findings)} extension{'s' if len(auto_findings) != 1 else ''}){Colors.RESET}")
+        print(f"  {Colors.DIM}  These permissions are required for the tool to function. Not flagged as a threat.{Colors.RESET}")
+        for chk, sev, msg in auto_findings:
+            short_msg = msg if len(msg) <= 60 else msg[:57] + "..."
+            print(f"    {Colors.CYAN}•{Colors.RESET} {Colors.WHITE}{short_msg}{Colors.RESET}")
         print()
 
     # ── LOW section ─────────────────────────────────────────
