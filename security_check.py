@@ -305,8 +305,12 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 # ============================================================
 
 # ── 1. Chrome Extensions ─────────────────────────────────────────────────────
-def _ext_source(manifest: dict) -> str:
-    """Detect whether the extension was installed from the Chrome Web Store."""
+def _ext_source(manifest: dict, name: str = "") -> str:
+    """Detect whether the extension was installed from the Chrome Web Store.
+    If the name contains __MSG_ it's an unresolved message key -> Unknown.
+    """
+    if "__MSG_" in name:
+        return "Unknown (unresolved name)"
     update_url = manifest.get("update_url", "")
     if "clients2.google.com" in update_url or "chrome.google.com" in update_url:
         return "Chrome Web Store"
@@ -357,7 +361,7 @@ def check_chrome_extensions(baseline: dict, config: dict):
                 name       = manifest.get("name", ext_id)
                 perms      = set(manifest.get("permissions", []))
                 host_perms = manifest.get("host_permissions", []) + manifest.get("permissions", [])
-                source     = _ext_source(manifest)
+                source     = _ext_source(manifest, name)
 
                 # Known malicious — always P0 regardless of other rules
                 if ext_id in KNOWN_MALICIOUS_EXTENSIONS:
@@ -386,17 +390,11 @@ def check_chrome_extensions(baseline: dict, config: dict):
 
                     else:
                         suspicious += 1
-                        # Rule 3 — PDF/web-capture: keep HIGH but update CTA
-                        is_pdf_capture = (
-                            "nativeMessaging" in danger_found
-                            and "webRequest" in danger_found
-                            and all_urls
-                        )
-                        cta_note = (" Verify the installation source on the Chrome Web Store before removing."
-                                    if is_pdf_capture else "")
-                        # Rule 4 — Embed source in message
+                        # Rule 3 — PDF/web-capture: keep HIGH, custom CTA handled
+                        # by _finding_cta() in render_dashboard. Do NOT embed the
+                        # CTA text in the message to avoid showing it twice.
                         msg = (f"High-risk extension: '{name}' [{', '.join(sorted(danger_found))}]"
-                               f" + all-URL access [Source: {source}].{cta_note}")
+                               f" + all-URL access [Source: {source}]")
                         findings.append((P1, msg))
                         json_log("Chrome Extensions", P1, msg, {"ext_id": ext_id})
 
@@ -1272,6 +1270,19 @@ def _explain_finding(check_name: str, sev: str, msg: str) -> str:
     return ""
 
 
+def _finding_cta(chk: str, msg: str) -> str:
+    """Return the correct call-to-action for a finding.
+    PDF/web-capture Chrome extensions get a custom CTA instead of the generic one.
+    All other findings use CTA_MAP.
+    """
+    if (chk == "Chrome Extensions"
+            and "nativeMessaging" in msg
+            and "webRequest" in msg
+            and "all-URL" in msg):
+        return "👉 Fix: Verify the installation source on the Chrome Web Store before removing."
+    return CTA_MAP.get(chk, "")
+
+
 def render_dashboard(
     all_findings: dict,
     summaries: dict,
@@ -1287,7 +1298,9 @@ def render_dashboard(
     medium_findings = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P2]
     low_findings    = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == P3]
     auto_findings   = [(chk, sev, msg) for chk, fs in all_findings.items() for sev, msg in fs if sev == AUTOMATION]
-    ok_checks       = [chk for chk, fs in all_findings.items() if not any(s != AUTOMATION for s, _ in fs)]
+    # Rule 5: ok_checks only counts checks with NO non-automation findings
+    ok_checks       = [chk for chk, fs in all_findings.items()
+                       if not any(s not in (AUTOMATION,) for s, _ in fs)]
 
     test_banner = "  ⚠️  TEST MODE — simulated data  ⚠️" if is_test else ""
     total_real  = len(high_findings) + len(medium_findings) + len(low_findings)
@@ -1326,7 +1339,7 @@ def render_dashboard(
         print(f"  {Colors.RED}{Colors.BOLD}🔴 HIGH  ({len(high_findings)} issue{'s' if len(high_findings) != 1 else ''}){Colors.RESET}")
         for chk, sev, msg in high_findings:
             expl = _explain_finding(chk, sev, msg)
-            cta  = CTA_MAP.get(chk, "")
+            cta  = _finding_cta(chk, msg)   # rule 3: PDF capture gets custom CTA
             print(f"  {Colors.RED}┌{'─' * (W - 2)}┐{Colors.RESET}")
             # Wrap the message
             for i, chunk in enumerate([msg[j:j+54] for j in range(0, max(len(msg), 1), 54)]):
@@ -1344,7 +1357,7 @@ def render_dashboard(
         print(f"  {Colors.YELLOW}{Colors.BOLD}🟡 MEDIUM  ({len(medium_findings)} item{'s' if len(medium_findings) != 1 else ''}){Colors.RESET}")
         for chk, sev, msg in medium_findings:
             expl = _explain_finding(chk, sev, msg)
-            cta  = CTA_MAP.get(chk, "")
+            cta  = _finding_cta(chk, msg)
             short_msg = msg if len(msg) <= 55 else msg[:52] + "..."
             print(f"    {Colors.YELLOW}•{Colors.RESET} {Colors.WHITE}{short_msg}{Colors.RESET}")
             if expl:
