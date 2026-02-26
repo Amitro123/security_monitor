@@ -34,6 +34,19 @@ except ImportError:
     subprocess.check_call([sys.executable, "-m", "pip", "install", "psutil", "-q"])
     import psutil
 
+# ── Auto-install keyring if missing (for secure credential storage) ──────────
+try:
+    import keyring
+    KEYRING_AVAILABLE = True
+except ImportError:
+    print("Installing required package: keyring...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "keyring", "-q"])
+    try:
+        import keyring
+        KEYRING_AVAILABLE = True
+    except Exception:
+        KEYRING_AVAILABLE = False
+
 # ── Windows registry (Windows only) ─────────────────────────────────────────
 try:
     import winreg
@@ -41,10 +54,12 @@ try:
 except ImportError:
     IS_WINDOWS = False
 
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
-VERSION     = "2.2.0"
+VERSION     = "2.3.0"
 BASE_DIR    = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 LOG_FILE    = BASE_DIR / "security_log.txt"
@@ -166,6 +181,17 @@ SUSPICIOUS_PORTS = {
 # Known TOR exit node IPs prefix sets (lightweight version)
 TOR_PREFIXES = ("176.10.", "195.176.3.", "185.220.", "45.142.")
 
+# ── WMI known-safe subscription objects (system defaults, not threats) ─────────
+WMI_KNOWN_SAFE = {
+    "BVTFilter",
+    "SCM Event Log Consumer",
+    "NTEventLogEventConsumer",
+    "MSFT_SCMEventLogConsumer",
+    "TSlogonEvents.filter",
+    "TSlogonEvents.consumer",
+    "RmShellEventConsumer",
+}
+
 INJECTION_PATTERNS = [
     r'ignore\s+previous\s+instructions',
     r'disregard\s+.*instructions',
@@ -182,6 +208,7 @@ INJECTION_PATTERNS = [
     r'system\s*\(',
 ]
 
+
 SUSPICIOUS_SERVICE_PATHS = (
     r'\temp\\', r'\downloads\\',
     r'\appdata\local\temp\\', r'\users\public\\',
@@ -197,10 +224,44 @@ def load_config() -> dict:
         for k, v in DEFAULT_CONFIG.items():
             if k not in cfg:
                 cfg[k] = v
+        # Auto-migrate plaintext app_password to keyring on first run
+        ec = cfg.get("email", {})
+        pw = ec.get("app_password", "")
+        if KEYRING_AVAILABLE and pw not in ("", "YOUR_GMAIL_APP_PASSWORD_HERE", "__KEYRING__", None):
+            try:
+                keyring.set_password("SecurityMonitor", ec.get("from", ""), pw)
+                cfg["email"]["app_password"] = "__KEYRING__"
+                with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+                    json.dump(cfg, f, indent=2)
+            except Exception:
+                pass  # Migration failed silently — plaintext still works
         return cfg
     with open(CONFIG_FILE, "w", encoding="utf-8") as f:
         json.dump(DEFAULT_CONFIG, f, indent=2)
     return DEFAULT_CONFIG.copy()
+
+
+def save_credential(service: str, username: str, password: str) -> bool:
+    """Save a credential to Windows Credential Manager via keyring."""
+    if not KEYRING_AVAILABLE:
+        return False
+    try:
+        keyring.set_password(service, username, password)
+        return True
+    except Exception:
+        return False
+
+
+def get_credential(service: str, username: str, fallback: str = "") -> str:
+    """Retrieve a credential from keyring; fall back to the provided value."""
+    if KEYRING_AVAILABLE:
+        try:
+            val = keyring.get_password(service, username)
+            if val:
+                return val
+        except Exception:
+            pass
+    return fallback
 
 
 def load_baseline() -> dict:
@@ -512,8 +573,14 @@ def check_network_connections():
     per_pid   = defaultdict(int)
     total_ext = 0
 
+    # Fix 3: wrap in ThreadPoolExecutor with 10s timeout to avoid blocking
     try:
-        conns = psutil.net_connections(kind="inet")
+        with ThreadPoolExecutor(max_workers=1) as ex:
+            future = ex.submit(psutil.net_connections, "inet")
+            try:
+                conns = future.result(timeout=10)
+            except FuturesTimeout:
+                return findings, "Network scan timed out (>10s) — skipped"
     except Exception as e:
         return findings, f"Could not enumerate connections: {e}"
 
@@ -871,6 +938,9 @@ Write-Output "CONSUMERS:$consumers"
             for item in items:
                 count += 1
                 name = item.get("Name", "")
+                # Fix 2: Skip known-safe system WMI subscriptions
+                if name in WMI_KNOWN_SAFE:
+                    continue
                 body = item.get("Query") or item.get("CommandLineTemplate", "")
                 for pat in SUSPICIOUS_PROCESS_PATTERNS + INJECTION_PATTERNS:
                     if re.search(pat, body or "", re.I):
@@ -879,7 +949,7 @@ Write-Output "CONSUMERS:$consumers"
                         json_log("WMI Persistence", P0, msg)
                         break
                 else:
-                    if body:  # any WMI consumer is worth flagging as Medium
+                    if body:  # any non-safe WMI consumer is worth flagging as Medium
                         msg = f"{label} found (review manually): '{name}'"
                         findings.append((P2, msg))
                         json_log("WMI Persistence", P2, msg)
@@ -1081,7 +1151,10 @@ def send_email_report(config: dict, all_findings: dict, summaries: dict) -> bool
 
         with smtplib.SMTP(ec["smtp_host"], int(ec["smtp_port"])) as srv:
             srv.starttls()
-            srv.login(ec["from"], ec["app_password"])
+            # Fix 1: use keyring if available, fall back to config value
+            password = get_credential("SecurityMonitor", ec["from"],
+                                      fallback=ec.get("app_password", ""))
+            srv.login(ec["from"], password)
             srv.send_message(msg)
 
         log("[Email] Report sent successfully.", INFO)
@@ -1495,8 +1568,9 @@ def run_clean_wizard(all_findings: dict, config: dict):
             if cta:
                 print(f"  {Colors.CYAN}  {cta}{Colors.RESET}")
             if "chrome" in chk.lower():
-                import subprocess as _sp
-                _sp.Popen(["cmd", "/c", "start", "chrome://extensions"], shell=True)
+                # Fix 4: use subprocess.run with shell=False (works on Windows 11)
+                subprocess.run(["cmd", "/c", "start", "chrome://extensions"],
+                               shell=False, creationflags=subprocess.CREATE_NO_WINDOW)
         else:
             print(f"  {Colors.DIM}  Skipped.{Colors.RESET}")
         print()

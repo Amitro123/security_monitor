@@ -7,7 +7,7 @@
 **Enterprise EDR for individuals — 95% MITRE coverage — Daily dashboard alerts**
 
 [![CI](https://github.com/Amitro123/security_monitor/actions/workflows/ci.yml/badge.svg)](https://github.com/Amitro123/security_monitor/actions)
-[![Version](https://img.shields.io/badge/version-2.2.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-2.3.0-blue.svg)](CHANGELOG.md)
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-informational.svg)](https://github.com/Amitro123/security_monitor)
@@ -140,10 +140,11 @@ graph TD
 
 | Metric | Value | Verify Yourself |
 |--------|-------|-----------------|
-| Scan time | 12–25s | `Measure-Command { python security_check.py --test } \| Select TotalSeconds` |
+| Scan time | 12–25s | `Measure-Command { python security_check.py --test } \| Select-Object TotalSeconds` |
+| Network scan timeout | 10s max | Built-in ThreadPoolExecutor timeout — busy machines won't hang |
 | Disk footprint | < 50 MB | `(Get-Item security_check.py).length / 1MB` |
 | Memory peak | < 50 MB | Task Manager during scan |
-| Python dependencies | 1 (`psutil`) | `pip show psutil` |
+| Python dependencies | 2 (`psutil`, `keyring`) | `pip show psutil keyring` |
 | MITRE techniques covered | 15 | See matrix above |
 
 ---
@@ -182,7 +183,8 @@ powershell -ExecutionPolicy Bypass -File .\setup.ps1
 > 2. Create a new app → name it "Security Monitor"
 > 3. Copy the **16-letter code** — enter it **without spaces** during setup
 
-Credentials are stored in **Windows Credential Manager** — not in any plain-text file.
+> [!NOTE]
+> **v2.3.0+**: The password is stored in **Windows Credential Manager** via the `keyring` library — not in plaintext in `config.json`. On first run after setup, it is migrated automatically and `config.json` will show `"app_password": "__KEYRING__"` as a placeholder.
 
 ---
 

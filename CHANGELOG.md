@@ -2,7 +2,34 @@
 
 All notable changes to Security Monitor are documented here.
 
+## [2.3.0] — 2026-02-26
+
+### 🔒 Security Hardening
+
+#### Fix 1 — Secure Email Password Storage
+- Added `keyring` as a dependency (auto-installed on first run)
+- Added `save_credential()` and `get_credential()` helpers backed by Windows Credential Manager
+- `load_config()` now auto-migrates a plaintext `app_password` to keyring on first run; `config.json` stores `"__KEYRING__"` as a placeholder
+- `send_email_report()` now retrieves the password via `get_credential()` with plaintext fallback
+
+#### Fix 2 — WMI False Positive Whitelist
+- Added `WMI_KNOWN_SAFE` constant (BVTFilter, SCM Event Log Consumer, NTEventLogEventConsumer, etc.)
+- `check_wmi_persistence()` now skips any subscription object whose name is in `WMI_KNOWN_SAFE`
+
+#### Fix 3 — Network Scan Timeout
+- Wrapped `psutil.net_connections()` in a `ThreadPoolExecutor` with a **10-second timeout**
+- Busy machines no longer cause a 30-second hang; summary reads `"Network scan timed out (>10s) — skipped"` if exceeded
+
+#### Fix 4 — `chrome://extensions` Subprocess Fix
+- `--clean` wizard now uses `subprocess.run(shell=False)` instead of `Popen(shell=True)` to reliably open `chrome://extensions` on Windows 11
+
+#### Testing
+- Added `test_v230.py` with 4 unit tests (WMI whitelist, net timeout, keyring round-trip, E2E `--test`) — all pass
+
+---
+
 ## [2.0.0] — 2026-02-25
+
 
 ### 🚀 Major Release — Enterprise EDR Engine
 
