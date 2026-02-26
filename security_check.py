@@ -430,7 +430,6 @@ def check_chrome_extensions(baseline: dict, config: dict, _ext_root=None):
     username   = os.environ.get("USERNAME", os.environ.get("USER", ""))
     ext_root   = _ext_root if _ext_root is not None else Path(f"C:/Users/{username}/AppData/Local/Google/Chrome/User Data")
 
-
     if not ext_root.exists():
         return findings, "Chrome not found on this machine"
 
@@ -854,7 +853,7 @@ def check_scheduled_tasks(baseline: dict):
 
             for pat in SUSPICIOUS_PROCESS_PATTERNS:
                 if re.search(pat, tname, re.I) or re.search(pat, texe, re.I):
-                    msg = f"Suspicious scheduled task: {t.get('TaskPath','')}{tname}"
+                    msg = f"Suspicious scheduled task: {t.get('TaskPath', '')}{tname}"
                     findings.append((P0, msg))
                     json_log("Scheduled Tasks", P0, msg)
                     break
@@ -1183,7 +1182,7 @@ def send_email_report(config: dict, all_findings: dict, summaries: dict) -> bool
     rows = []
     for check, findings in all_findings.items():
         icon = "✅ OK" if not findings else f"🚨 {len(findings)} ALERT(S)"
-        rows.append(f"<tr><td><b>{check}</b></td><td>{icon}</td><td>{summaries.get(check,'')}</td></tr>")
+        rows.append(f"<tr><td><b>{check}</b></td><td>{icon}</td><td>{summaries.get(check, '')}</td></tr>")
         for sev, f in findings:
             c = sev_colors.get(sev, "#333")
             rows.append(f"<tr><td colspan='3' style='color:{c};padding-left:20px'>• [{sev}] {f}</td></tr>")
@@ -1434,7 +1433,6 @@ def render_dashboard(
                        if not any(s not in (AUTOMATION,) for s, _ in fs)]
 
     test_banner = "  ⚠️  TEST MODE — simulated data  ⚠️" if is_test else ""
-    total_real  = len(high_findings) + len(medium_findings) + len(low_findings)
 
     # ── Header ──────────────────────────────────────────────
     print()
@@ -1741,7 +1739,7 @@ Examples:
         if not BASELINE.exists():
             log("    [WARN] baseline.json missing — run setup.ps1 or use --baseline", P2)
         else:
-            log(f"    [OK]   Baseline exists (generated: {baseline_data.get('generated_at','?')})", INFO)
+            log(f"    [OK]   Baseline exists (generated: {baseline_data.get('generated_at', '?')})", INFO)
 
         # Scheduled task
         if IS_WINDOWS:
