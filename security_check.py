@@ -192,6 +192,15 @@ WMI_KNOWN_SAFE = {
     "RmShellEventConsumer",
 }
 
+# ── VS Code subdirectories that should never be scanned for injection patterns ──────
+VSCODE_SKIP_DIRS = {
+    "workspaceStorage", "chatEditingSessions", "History",
+    "backupWorkspaces", "logs",
+}
+
+# ── Browser processes legitimately open many connections — whitelist them ─────────
+HIGH_CONN_WHITELIST = {"chrome.exe", "firefox.exe", "msedge.exe", "brave.exe"}
+
 INJECTION_PATTERNS = [
     r'ignore\s+previous\s+instructions',
     r'disregard\s+.*instructions',
@@ -366,6 +375,33 @@ $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
 # ============================================================
 
 # ── 1. Chrome Extensions ─────────────────────────────────────────────────────
+def _resolve_msg_name(name: str, vdir: Path) -> str:
+    """Resolve a Chrome i18n message key (__MSG_key__) to a real name.
+
+    Looks for the localized string in _locales/en/messages.json or
+    _locales/en_US/messages.json relative to the extension version directory.
+    Returns the resolved name, or the original string if resolution fails.
+    """
+    if not name.startswith("__MSG_") or not name.endswith("__"):
+        return name
+    key = name[6:-2]  # strip '__MSG_' prefix and '__' suffix
+    for locale in ("en", "en_US", "en_GB"):
+        messages_path = vdir / "_locales" / locale / "messages.json"
+        if messages_path.exists():
+            try:
+                msgs = json.loads(messages_path.read_text(encoding="utf-8", errors="ignore"))
+                # Messages.json: {"key": {"message": "Real Name"}}
+                # Keys are case-insensitive in Chrome
+                for k, v in msgs.items():
+                    if k.lower() == key.lower():
+                        resolved = v.get("message", "").strip()
+                        if resolved:
+                            return resolved
+            except Exception:
+                pass
+    return name  # resolution failed — caller keeps 'Unknown' source behavior
+
+
 def _ext_source(manifest: dict, name: str = "") -> str:
     """Detect whether the extension was installed from the Chrome Web Store.
     If the name contains __MSG_ it's an unresolved message key -> Unknown.
@@ -428,7 +464,9 @@ def check_chrome_extensions(baseline: dict, config: dict, _ext_root=None):
 
                 total_exts += 1
                 seen_ids.add(ext_id)
-                name       = manifest.get("name", ext_id)
+                raw_name  = manifest.get("name", ext_id)
+                # Fix 1: attempt to resolve Chrome i18n message keys
+                name       = _resolve_msg_name(raw_name, vdir)
                 perms      = set(manifest.get("permissions", []))
                 host_perms = manifest.get("host_permissions", []) + manifest.get("permissions", [])
                 source     = _ext_source(manifest, name)
@@ -627,6 +665,9 @@ def check_network_connections():
                 pname = psutil.Process(pid).name()
             except Exception:
                 pname = "?"
+            # Fix 3: browsers legitimately open many connections — skip them
+            if pname.lower() in HIGH_CONN_WHITELIST:
+                continue
             msg = f"Process with many external connections: {pname} (PID {pid}) — {cnt} connections"
             findings.append((P2, msg))
             json_log("Network Connections", P2, msg, {"pid": pid, "count": cnt})
@@ -692,6 +733,9 @@ def check_ai_tool_configs():
         if not d.exists():
             continue
         for jf in d.rglob("*.json"):
+            # Fix 2: skip VS Code internal state directories
+            if any(part in VSCODE_SKIP_DIRS for part in jf.parts):
+                continue
             scanned += 1
             try:
                 text = jf.read_text(encoding="utf-8", errors="ignore")
@@ -759,12 +803,17 @@ def check_windows_defender():
                 except Exception:
                     pass
 
-        # Check for Defender exclusions (common attacker technique)
+        # Fix 4: Check for Defender exclusions — skip gracefully on permission errors
         excl = run_ps("(Get-MpPreference).ExclusionPath | ConvertTo-Json -Compress")
         if excl and excl not in ("null", "[]", ""):
-            msg = f"Defender has path exclusions configured: {excl[:200]}"
-            findings.append((P2, msg))
-            json_log("Windows Defender", P2, msg)
+            # Guard: if PS returned a permission/access error, skip rather than flag
+            if (excl.startswith("N/A") or "Must be" in excl or "Access" in excl
+                    or "Administrator" in excl or "not recognized" in excl.lower()):
+                pass  # insufficient privileges — skip exclusions check silently
+            else:
+                msg = f"Defender has path exclusions configured: {excl[:200]}"
+                findings.append((P2, msg))
+                json_log("Windows Defender", P2, msg)
 
     except Exception as e:
         return findings, f"Could not query Defender: {e}"

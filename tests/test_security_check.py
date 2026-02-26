@@ -8,16 +8,14 @@ import sys
 import time
 import subprocess
 from pathlib import Path
-from io import StringIO
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
-# Make sure parent directory is on the path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 import security_check as sc
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 CLEAN_CONFIG = {"mode": "standard", "trusted_items": []}
 EMPTY_BASELINE = {}
@@ -70,7 +68,6 @@ def test_chrome_ext_deduplication(tmp_path):
         permissions=["nativeMessaging", "webRequest", "cookies", "history"],
         host_permissions=["<all_urls>"],
     )
-    # Create same ext in Default AND a second profile
     _write_ext(tmp_path / "Default", ext_id, high_risk_manifest)
     _write_ext(tmp_path / "Profile 1", ext_id, high_risk_manifest)
 
@@ -193,7 +190,6 @@ def test_render_dashboard_high_count(capsys):
     sc.render_dashboard(all_findings, summaries, scan_duration=1.0, is_test=True)
     captured = capsys.readouterr()
     output = captured.out
-    # Dashboard should show "HIGH  (2 issues)"
     assert "2" in output and "HIGH" in output, (
         f"Expected '2 HIGH' in dashboard output.\nActual output:\n{output}"
     )
@@ -203,17 +199,19 @@ def test_render_dashboard_high_count(capsys):
 
 def test_e2e_test_mode():
     """Running --test must exit code 1 and print HIGH in combined output."""
+    # Force UTF-8 I/O in the child so box-drawing/emoji chars don't crash on Windows cp1252
+    child_env = {**os.environ, "PYTHONUTF8": "1", "PYTHONIOENCODING": "utf-8"}
     result = subprocess.run(
         [sys.executable, "security_check.py", "--test"],
         capture_output=True,
-        text=True,
         timeout=120,
+        env=child_env,
         cwd=Path(__file__).parent.parent,
     )
-    combined = result.stdout + result.stderr
+    combined = (result.stdout + result.stderr).decode("utf-8", errors="replace")
     assert result.returncode == 1, (
         f"--test should exit 1 (threats found), got {result.returncode}"
     )
     assert "HIGH" in combined, (
-        f"Expected 'HIGH' in output.\nstdout={result.stdout[:500]!r}"
+        f"Expected 'HIGH' in output.\nraw={result.stdout[:500]!r}"
     )
