@@ -1682,7 +1682,9 @@ Examples:
 
     t0 = datetime.datetime.now()
     for check_name, check_fn in checks:
-        print(f"  {Colors.DIM}  ▸ {check_name}...{Colors.RESET}", end="\r")
+        # Write progress to stderr so it doesn't interfere with stdout dashboard
+        sys.stderr.write(f"\r  \033[2K  \u25b8 {check_name}...")  # \033[2K = erase current line
+        sys.stderr.flush()
         try:
             findings, summary = check_fn()
         except Exception as ex:
@@ -1690,7 +1692,7 @@ Examples:
 
         all_findings[check_name] = findings
         summaries[check_name]    = summary
-        # Also write to log file silently
+        # Write to log file silently
         ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with open(LOG_FILE, "a", encoding="utf-8") as lf:
             lf.write(f"[{ts}] {check_name}: {summary}\n")
@@ -1698,8 +1700,9 @@ Examples:
                 lf.write(f"[{ts}]   [{sev}] {f}\n")
                 json_log(check_name, sev, f)
 
-    # Clear the progress line
-    print(" " * 60, end="\r")
+    # Clear the progress line from stderr
+    sys.stderr.write("\r\033[2K")
+    sys.stderr.flush()
 
     duration       = (datetime.datetime.now() - t0).total_seconds()
     critical_count = sum(1 for v in all_findings.values() for sev, _ in v if sev in (P0, P1))
