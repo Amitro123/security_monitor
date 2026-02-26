@@ -44,7 +44,7 @@ except ImportError:
 # ============================================================
 # CONFIGURATION
 # ============================================================
-VERSION     = "2.1.0"
+VERSION     = "2.2.0"
 BASE_DIR    = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 LOG_FILE    = BASE_DIR / "security_log.txt"
@@ -60,7 +60,17 @@ DEFAULT_CONFIG = {
         "smtp_port":    587
     },
     "mode": "standard",   # paranoid | standard | light
-    "script_hash": ""
+    "script_hash": "",
+    # trusted_items: list of substrings — any finding whose message contains
+    # one of these strings is silently suppressed (treated as whitelisted).
+    "trusted_items": [
+        "SCM Event",                    # Windows Service Control Manager WMI filter
+        "Copilot",                       # GitHub Copilot Chat config
+        "copilot",
+        "ANTHROPIC_API_KEY",            # Your own API keys in env
+        "CONTEXT7_API_KEY",
+        "GOOGLE_API_KEY"
+    ]
 }
 
 # ── Severity Levels ──────────────────────────────────────────────────────────
@@ -1124,14 +1134,35 @@ def generate_baseline() -> dict:
 # ============================================================
 
 def _score_findings(all_findings: dict) -> int:
-    """Calculate a 0-100 security score. 100 = clean, 0 = critical."""
-    deductions = {P0: 25, P1: 15, P2: 5, P3: 1}
-    total_deducted = sum(
-        deductions.get(sev, 0)
-        for findings in all_findings.values()
-        for sev, _ in findings
-    )
+    """Calculate a 0-100 security score. 100 = clean, 0 = critical.
+    
+    Scoring is capped per-check (max -20 per check) so a single noisy
+    check with many findings can't tank the whole score on its own.
+    """
+    deductions = {P0: 20, P1: 12, P2: 4, P3: 1}
+    total_deducted = 0
+    for findings in all_findings.values():
+        # Cap deduction per check at the worst single finding's value
+        if not findings:
+            continue
+        worst = max(deductions.get(sev, 0) for sev, _ in findings)
+        total_deducted += worst
     return max(0, 100 - total_deducted)
+
+
+def filter_findings(all_findings: dict, config: dict) -> dict:
+    """Remove any findings whose message matches a trusted_items pattern.
+    Returns a new dict with whitelisted entries removed.
+    """
+    trusted = [t.lower() for t in config.get("trusted_items", [])]
+    if not trusted:
+        return all_findings
+    filtered = {}
+    for check, findings in all_findings.items():
+        kept = [(sev, msg) for sev, msg in findings
+                if not any(t in msg.lower() for t in trusted)]
+        filtered[check] = kept
+    return filtered
 
 
 def _score_bar(score: int) -> str:
@@ -1340,6 +1371,74 @@ def run_fix_wizard(all_findings: dict):
     print(f"  {Colors.GREEN}Fix wizard complete. Re-run the scan after applying fixes.{Colors.RESET}\n")
 
 
+# -- Interactive --clean wizard (whitelist + fix combined) --------------------
+def run_clean_wizard(all_findings: dict, config: dict):
+    """Walk through every finding and let the user Trust / Fix / Skip it.
+    Trusted items are saved to config.json so they never alert again.
+    """
+    all_items = [
+        (chk, sev, msg)
+        for chk, fs in all_findings.items()
+        for sev, msg in fs
+    ]
+    if not all_items:
+        print(f"\n  {Colors.GREEN}Nothing to clean — your system is clear!{Colors.RESET}\n")
+        return
+
+    trusted = list(config.get("trusted_items", []))
+    newly_trusted = []
+
+    print(f"\n{Colors.BOLD}{Colors.CYAN}  🧹 CLEAN WIZARD — {len(all_items)} finding(s){Colors.RESET}")
+    print(f"  {Colors.DIM}For each finding choose: [T]rust forever  [F]ix now  [S]kip{Colors.RESET}\n")
+
+    for i, (chk, sev, msg) in enumerate(all_items, 1):
+        emoji = "🔴" if sev in (P0, P1) else ("🟡" if sev == P2 else "🔵")
+        cta   = CTA_MAP.get(chk, "")
+        expl  = _explain_finding(chk, sev, msg)
+
+        print(f"  {Colors.BOLD}[{i}/{len(all_items)}]{Colors.RESET} {emoji} {Colors.BOLD}{chk}{Colors.RESET}")
+        short = msg if len(msg) <= 70 else msg[:67] + "..."
+        print(f"  {Colors.WHITE}  {short}{Colors.RESET}")
+        if expl:
+            print(f"  {Colors.DIM}  {expl}{Colors.RESET}")
+        if cta:
+            print(f"  {Colors.CYAN}  {cta}{Colors.RESET}")
+        print()
+
+        try:
+            ans = input("  [T]rust / [F]ix / [S]kip → ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  Clean wizard cancelled.")
+            break
+
+        if ans in ("t", "trust"):
+            # Extract a short keyword from the message to use as a pattern
+            # Use first 40 chars of the message as the trust pattern
+            pattern = msg[:40].rstrip()
+            if pattern not in trusted:
+                trusted.append(pattern)
+                newly_trusted.append(pattern)
+            print(f"  {Colors.GREEN}  ✅ Trusted! Won't appear in future scans.{Colors.RESET}")
+        elif ans in ("f", "fix"):
+            print(f"  {Colors.YELLOW}  Opening fix instructions...{Colors.RESET}")
+            if cta:
+                print(f"  {Colors.CYAN}  {cta}{Colors.RESET}")
+            if "chrome" in chk.lower():
+                import subprocess as _sp
+                _sp.Popen(["cmd", "/c", "start", "chrome://extensions"], shell=True)
+        else:
+            print(f"  {Colors.DIM}  Skipped.{Colors.RESET}")
+        print()
+
+    if newly_trusted:
+        config["trusted_items"] = trusted
+        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+        print(f"  {Colors.GREEN}✅ Saved {len(newly_trusted)} trust rule(s) to config.json.{Colors.RESET}")
+        print(f"  {Colors.DIM}  These findings will be silently suppressed in all future scans.{Colors.RESET}\n")
+    print(f"  {Colors.GREEN}Clean wizard done. Re-run the scan to see your updated score.{Colors.RESET}\n")
+
+
 # ── Interactive --baseline-update wizard ─────────────────────────────────────
 def run_baseline_update(all_findings: dict, baseline_data: dict):
     """Show drift findings and let the user approve new items into the baseline."""
@@ -1397,6 +1496,7 @@ Examples:
     parser.add_argument("--baseline",         action="store_true", help="Regenerate the baseline.json snapshot")
     parser.add_argument("--fix",              action="store_true", help="Interactive wizard to fix high-severity findings")
     parser.add_argument("--baseline-update",  action="store_true", help="Approve new baseline items interactively")
+    parser.add_argument("--clean",            action="store_true", help="Interactive clean wizard: Trust/Fix/Skip each finding")
     args = parser.parse_args()
 
     log("=" * 60)
@@ -1547,9 +1647,13 @@ Examples:
     critical_count = sum(1 for v in all_findings.values() for sev, _ in v if sev in (P0, P1))
     total          = sum(len(v) for v in all_findings.values())
 
+    # Apply whitelist filter before displaying
+    all_findings = filter_findings(all_findings, config)
     render_dashboard(all_findings, summaries, duration)
 
     # ── Notification ───────────────────────────────────────
+    total          = sum(len(v) for v in all_findings.values())
+    critical_count = sum(1 for v in all_findings.values() for sev, _ in v if sev in (P0, P1))
     if total == 0:
         send_windows_notification(
             "Security Check Passed ✅",
@@ -1565,7 +1669,9 @@ Examples:
     send_email_report(config, all_findings, summaries)
 
     # ── Optional post-scan modes ───────────────────────────
-    if args.fix:
+    if args.clean:
+        run_clean_wizard(all_findings, config)
+    elif args.fix:
         run_fix_wizard(all_findings)
     if args.baseline_update:
         run_baseline_update(all_findings, baseline_data)
