@@ -11,12 +11,16 @@
 [![Python 3.8+](https://img.shields.io/badge/python-3.8%2B-blue.svg)](https://python.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11-informational.svg)](https://github.com/Amitro123/security_monitor)
+[![Windows Only](https://img.shields.io/badge/platform-Windows--only-blue.svg)](CONTRIBUTING.md)
+[![Contributing](https://img.shields.io/badge/contributions-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 </div>
 
 ---
 
 > Lightweight, automated daily security monitor with **15 detection vectors**, baseline drift detection, MITRE ATT&CK coverage, and a beautiful security dashboard. No subscription. No cloud. No telemetry.
+>
+> **This project is Windows-only.** Linux/macOS contributors are welcome to fork and extend it — see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Why This Was Created
 In an era where threats like cryptominers, remote access trojans (RATs), and prompt-injections via AI tools (like OpenClaw, Claude, MCP) are increasingly common, relying on Windows Defender alone isn't enough. Security Monitor acts as a **proactive, customizable second layer** to hunt for threats that slip through.
@@ -156,6 +160,16 @@ graph TD
 | `paranoid` | High (lower thresholds) | Security professionals, servers |
 | `standard` | Balanced | Personal daily use **[default]** |
 | `light` | Minimal | Low-end machines, fastest scan |
+
+---
+
+## Requirements
+
+| Requirement | Detail |
+|-------------|--------|
+| OS | Windows 10 / 11 only |
+| Python | 3.8 or newer |
+| Dependencies | `psutil`, `keyring` (auto-installed by `setup.ps1` or `pip install -r requirements.txt`) |
 
 ---
 

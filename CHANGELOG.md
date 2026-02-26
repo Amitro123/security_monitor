@@ -4,6 +4,23 @@ All notable changes to Security Monitor are documented here.
 
 ## [2.3.0] — 2026-02-26
 
+### Added
+- **Full pytest test suite** — 10 tests in `tests/test_security_check.py` covering WMI whitelist, extension dedup, source detection, automation classification, net timeout, keyring, filter_findings, CTA logic, dashboard counter, and E2E mode
+- **`pyproject.toml`** and **`requirements.txt`** for standard Python packaging (`pip install -r requirements.txt`)
+- **`CONTRIBUTING.md`** — Windows-only policy, coding style guide, and instructions for adding new detection checks
+- **`WMI_KNOWN_SAFE`** whitelist — eliminates BVTFilter / SCM Event Log Consumer false positives
+- **net_connections 10-second timeout** using `ThreadPoolExecutor` — prevents scan hang on busy machines
+- **Keyring credential storage** — Gmail password migrated from plaintext `config.json` to Windows Credential Manager on first run
+- **`chrome://extensions` subprocess fix** — uses `shell=False` for reliable behavior on Windows 11
+
+### Changed
+- README: added Windows-only badge, Contributing badge, Requirements section, and Windows-only note in intro
+- Version bumped to 2.3.0
+
+---
+
+
+
 ### 🔒 Security Hardening
 
 #### Fix 1 — Secure Email Password Storage

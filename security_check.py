@@ -380,11 +380,20 @@ def _ext_source(manifest: dict, name: str = "") -> str:
     return "Unknown (no update URL)"
 
 
-def check_chrome_extensions(baseline: dict, config: dict):
+def check_chrome_extensions(baseline: dict, config: dict, _ext_root=None):
+    """Scan Chrome extensions for high-risk permissions, automation tools, and baseline drift.
+
+    Args:
+        baseline: Baseline dict (may contain 'chrome_extensions' list of known IDs).
+        config:   Config dict (for 'mode' selection).
+        _ext_root: Optional Path override for the Chrome User Data directory.
+                   Used in tests to inject a temporary directory.
+    """
     findings   = []
     mode       = config.get("mode", "standard")
     username   = os.environ.get("USERNAME", os.environ.get("USER", ""))
-    ext_root   = Path(f"C:/Users/{username}/AppData/Local/Google/Chrome/User Data")
+    ext_root   = _ext_root if _ext_root is not None else Path(f"C:/Users/{username}/AppData/Local/Google/Chrome/User Data")
+
 
     if not ext_root.exists():
         return findings, "Chrome not found on this machine"

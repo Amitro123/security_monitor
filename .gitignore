@@ -7,3 +7,8 @@ task.txt
 __pycache__/
 __pycache__/
 .env
+
+pytest_output.txt
+test_v230.py
+.pytest_cache/
+__pycache__/
